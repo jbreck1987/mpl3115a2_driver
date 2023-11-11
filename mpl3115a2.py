@@ -5,6 +5,7 @@ Author: Josh Breckenridge
 Date: 11/11/2023
 """
 from micropython import const
+from machine import I2C, Pin
 
 # Register Definitions
 
@@ -27,7 +28,7 @@ OUT_P_DELTA_CSB = const(0x08)
 OUT_P_DELTA_LSB = const(0x09)
 OUT_T_DELTA_MSB = const(0x0A)
 OUT_T_DELTA_LSB = const(0x0B)
-DEVICE_ID = const(0x0C)
+WHO_AM_I = const(0x0C)
 F_STATUS = const(0x0D)
 F_SETUP = const(0x0F)
 TIME_DLY = const(0x10)
@@ -60,3 +61,87 @@ CTRL_REG5 = const(0x2A)
 OFF_P = const(0x2B)
 OFF_T = const(0x2C)
 OFF_H = const(0x2D)
+
+# Device Constants
+DEVICE_ID = const(0xC4)
+SLAVE_ID = const(0xC0)
+
+class Buffer():
+    """
+    Simple buffer using a bytearray. If the buffer is full,
+    any new data needing to be added to the buffer is thrown away.
+    """
+    def __init__(self, size: int) -> None:
+        self.data = bytearray(size)
+        self.temp = bytearray(size)
+        self.write_idx = 0
+
+
+    def read(self, num_bytes: int):
+        # Clear out the temp buffer
+        for i in range(0, len(self.temp)):
+            self.temp[i] = 0
+        
+        # Move data to temp array and erase the data for the next
+        # use.
+        for i in range(0, num_bytes):
+            self.temp[i] = self.data[i]
+            self.data[i] = 0
+        
+        return self.temp
+
+
+
+class MPL3115A2():
+    """
+    Object representing a single MPL3115A2 device. The device can run as a Barometer or
+    Altimeter. Within these modes, the device presents data using non-FIFO mode
+    or FIFO mode, either using polling or interrupts. The user will need to determine which
+    configuration the device will use, see Pg. 13 in the datasheet. By default, the device
+    will be in pressure sensor, non-FIFO, polling mode.
+    """
+    def __init__(self, sda: Pin, scl: Pin, i2c_clk: int) -> None:
+        self.i2c = I2C(id=DEVICE_ID, scl=scl,  sda=sda, freq=i2c_clk)
+
+        # Create a miscellaneous and data buffer for storing return values.
+        # The miscellaneous buffer is circular with 16 bits being more
+        # than enough for all control logic.
+        self._tx_buff = bytearray(12)
+        # There are 5 registers that need to be read
+        # concurrently to get a single pressure and temp reading.
+        self._rx_buff = bytearray(12)
+
+        # Make sure device is reachable and has the correct
+        # Device ID
+        self._read_reg(WHO_AM_I, 1)
+        if self._rx_buff[0] != DEVICE_ID:
+            raise MemoryError(f'Device ID is not ')
+        
+
+
+    def _read_reg(self, reg_addr: int, num_bytes: int) -> None:
+        """
+        Reads data from register(s) into the rx buffer.
+        """
+        # Reset the rx buffer to zero
+        for i in range(0, len(self._rx_buff)):
+            self._rx_buff[i] = 0
+        
+        # Read the register(s) and store in rx_buff
+        for i in range(0, num_bytes):
+            if i == num_bytes:
+                # Release the I2C bus
+                self._rx_buff[i] = self.i2c.readfrom(reg_addr + i, 1)
+            else:
+                # Don't release the I2C bus
+                self._rx_buff[i] = self.i2c.readfrom(reg_addr + i, 1, stop=False)
+    
+    def _write_reg(self, reg_addr: int, data: bytearray) -> None:
+        """
+        Writes data to register(s).
+        """
+        self.i2c.writeto(reg_addr, data)
+
+
+        
+        
