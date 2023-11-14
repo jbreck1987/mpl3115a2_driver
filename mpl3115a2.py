@@ -6,6 +6,7 @@ Date: 11/11/2023
 """
 from micropython import const
 from machine import I2C, Pin
+from time import sleep_ms
 
 # Register Definitions
 
@@ -64,7 +65,7 @@ OFF_H = const(0x2D)
 
 # Device Constants
 DEVICE_ID = const(0xC4)
-SLAVE_ID = const(0xC0)
+
 
 class Buffer():
     """
@@ -98,28 +99,17 @@ class MPL3115A2():
     Altimeter. Within these modes, the device presents data using non-FIFO mode
     or FIFO mode, either using polling or interrupts. The user will need to determine which
     configuration the device will use, see Pg. 13 in the datasheet. By default, the device
-    will be in pressure sensor, non-FIFO, polling mode.
+    will be in Barometer, non-FIFO, polling mode.
     """
     def __init__(self, sda: Pin, scl: Pin, i2c_clk: int) -> None:
         self.i2c = I2C(id=DEVICE_ID, scl=scl,  sda=sda, freq=i2c_clk)
 
-        # Create a miscellaneous and data buffer for storing return values.
-        # The miscellaneous buffer is circular with 16 bits being more
-        # than enough for all control logic.
+        # Create receive and send buffers to minimize memory fragmentation
+        # when reading or writing registers.
         self._tx_buff = bytearray(12)
-        # There are 5 registers that need to be read
-        # concurrently to get a single pressure and temp reading.
         self._rx_buff = bytearray(12)
 
-        # Make sure device is reachable and has the correct
-        # Device ID
-        self._read_reg(WHO_AM_I, 1)
-        if self._rx_buff[0] != DEVICE_ID:
-            raise MemoryError(f'Device ID is not ')
-        
-
-
-    def _read_reg(self, reg_addr: int, num_bytes: int) -> None:
+    def read_reg(self, reg_addr: int, num_bytes: int) -> None:
         """
         Reads data from register(s) into the rx buffer.
         """
@@ -135,13 +125,45 @@ class MPL3115A2():
             else:
                 # Don't release the I2C bus
                 self._rx_buff[i] = self.i2c.readfrom(reg_addr + i, 1, stop=False)
-    
-    def _write_reg(self, reg_addr: int, data: bytearray) -> None:
+
+    def init(self):
         """
-        Writes data to register(s).
+        Factory resets and initializes the device.
         """
-        self.i2c.writeto(reg_addr, data)
+        # Make sure the device is reachable
+        self.read_reg(WHO_AM_I, 1)
+        if self._rx_buff[0] != DEVICE_ID:
+            raise MemoryError(f'Incorrect Device ID, received: {self._rx_buff[0]}, expected: {DEVICE_ID}')
+        
+        # Reset the device using the RST bit in CTRL_REG1 then wait for the device to reboot.
+        self.i2c.write(CTRL_REG1, b'\x04')
+        while ((self.read_reg(CTRL_REG1, num_bytes=1)[0] & 0x04) >> 2) != 0:
+            print(f'Device rebooting...')
+            sleep_ms(500)
+        print('Reboot complete')
+
+        # Set the device to flag when a new temperature or pressure reading is available by setting
+        # all available bits in the PT_DATA_CFG register.
+        self.i2c.writeto(PT_DATA_CFG, b'\x07')
+        print(f'Setting data event generation flags to signal new temp/pressure data')
+
+        # Set oversample ratio so the minimum time between data samples is 512ms using
+        # the 3 OS bits in CTRL_REG1. Device is in Barometer mode by default.
+        self.i2c.writeto(CTRL_REG1, b'\x38')
+        print('Setting Oversample ratio to 128')
+
+        # Set the device to active mode so that it starts taking data by setting the SBYB bit
+        # in the CTRL_REG1 register.
+        self.read_reg(CTRL_REG1, 1)
+        self._tx_buff[0] = self._rx_buff[0] | 0x01
+        self.i2c.writeto(CTRL_REG1, self._tx_buff[0:1])
+        self._tx_buff[0] = 0
+        print('Device set to ACTIVE mode, ready to make measurements.')
 
 
         
+
+
         
+
+
